@@ -1,0 +1,5 @@
+*.algo
+results/
+*.db
+*.db-wal
+*.db-shm

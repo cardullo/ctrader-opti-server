@@ -1,0 +1,33 @@
+# Example job configuration for cTrader Optimization Server
+# Save as job.yaml and pass to: opti submit --algo MyBot.algo --config job.yaml
+
+name: EMA_v2.2_EURUSD_grid
+symbol: EURUSD
+period: H1
+start: "01/01/2023"
+end: "01/01/2025"
+data_mode: m1
+balance: 10000
+commission: 15
+spread: 1
+strategy: genetic
+max_passes: 200
+parallel_workers: 4
+fitness: profit_factor
+params:
+  FastPeriod:
+    min: 5
+    max: 30
+    step: 5
+  SlowPeriod:
+    min: 20
+    max: 100
+    step: 10
+  StopLossPips:
+    min: 20
+    max: 60
+    step: 10
+  TakeProfitPips:
+    min: 30
+    max: 90
+    step: 10
