@@ -1,21 +1,35 @@
-# cTrader Optimization Server
+# cTrader Optimization Server 🚀
 
-A remote cBot optimization orchestration system that wraps the official
-[cTrader CLI Docker image](https://github.com/spotware/ctrader-cli) to run
-parameter‑sweep backtests as parallel Docker jobs, with **grid**, **random**,
-and **genetic** optimization strategies.
+A high-performance cBot optimization orchestration system. It wraps the standalone [cTrader CLI Docker image](https://github.com/spotware/ctrader-cli) to run parameter-sweep backtests as massive parallel jobs, overcoming the single-threaded limitations of the standard CLI.
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Docker](https://img.shields.io/badge/Docker-Enabled-blue)](https://www.docker.com/)
+
+---
+
+### Why this project?
+cTrader's official CLI is powerful but only supports individual backtests. To perform a parameter sweep (optimization), users traditionally have to manually script multiple runs or use the Desktop GUI—which is tied to a single machine.
+
+This project enables:
+- **True Parallelization**: Run hundreds of optimization passes in parallel across multiple CPU cores.
+- **Remote Orchestration**: Submit a job from your Mac/local machine and let a powerful Linux VPS handle the heavy lifting.
+- **Smart Strategies**: Includes built-in support for **Grid**, **Random**, and **Genetic** search algorithms.
+- **REST API**: Fully headless management of backtest jobs.
+
+---
+
+```mermaid
+graph LR
+    A[opti CLI] -- REST --> B[FastAPI Server]
+    B -- Docker Socket --> C[Pass #1]
+    B -- Docker Socket --> D[Pass #2]
+    B -- Docker Socket --> E[Pass #N]
+    style B fill:#f9f,stroke:#333,stroke-width:2px
 ```
-┌──────────────┐          ┌──────────────────────────────────┐
-│  opti CLI    │  REST    │  FastAPI Server (VPS)            │
-│  (your Mac)  │ ──────▶  │  ┌──────┐  ┌──────┐  ┌──────┐  │
-│              │          │  │ pass │  │ pass │  │ pass │  │
-│  submit      │          │  │  #1  │  │  #2  │  │  #3  │  │
-│  watch       │          │  └──────┘  └──────┘  └──────┘  │
-│  results     │          │      ▲ Docker containers ▲      │
-│  best        │          │      └── ctrader-cli ──────┘    │
-└──────────────┘          └──────────────────────────────────┘
-```
+
+## Quick Start
+Detailed installation guides for all platforms can be found in [docs/setup.md](docs/setup.md).
+
 
 ## Prerequisites
 
