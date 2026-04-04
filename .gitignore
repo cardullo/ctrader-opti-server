@@ -23,6 +23,12 @@ data/results/
 data/*.db
 data/*.db-wal
 data/*.db-shm
+data/pwd
+
+# Local deployment & tests
+kamatera.md
+*.sh
+test_job.yaml
 
 # OS
 .DS_Store

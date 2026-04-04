@@ -109,17 +109,16 @@ async def run_single_pass(
         result_dir = settings.results_dir / pass_id
         result_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write cbotset
-        cbotset_path = settings.algos_dir / f"{pass_id}.cbotset"
-        write_cbotset(params, cbotset_path)
+        # Docker volumes — use HOST paths for sibling container bind mounts.
+        # The server container sees /data/algos, but ctrader-cli containers
+        # are siblings (spawned via Docker socket) and need HOST paths.
+        host_algos = str(settings.host_algos_dir.resolve())
+        host_results = str((settings.host_results_dir / pass_id).resolve())
+        host_pwd = str(settings.host_pwd_file_path.resolve())
 
-        # Docker volumes
-        algos_mount = str(settings.algos_dir.resolve())
-        results_mount = str(result_dir.resolve())
-        pwd_file_host = str(Path(settings.pwd_file_path).resolve())
-
-        # ctrader-cli uses hyphenated env var names and reads the
-        # .cbotset as the second positional argument after the .algo path.
+        # ctrader-cli uses hyphenated env var names for backtest config.
+        # cBot parameters are passed as --ParamName=Value flags on the
+        # command line (NOT via a .cbotset file when using --environment-variables).
         environment = {
             "CTID": ctid,
             "PWD-FILE": "/mnt/pwd",
@@ -135,16 +134,24 @@ async def run_single_pass(
             "REPORT-JSON": "/mnt/results/report.json",
         }
 
-        # The cbotset file is the second positional arg after the .algo
-        command = (
-            f"backtest /mnt/algos/{job_id}.algo "
-            f"/mnt/algos/{pass_id}.cbotset "
-            f"--environment-variables --exit-on-stop"
-        )
+        # Build command as a list for proper argument parsing.
+        # cBot params go as --Key=Value flags after the other flags.
+        command = [
+            "backtest",
+            f"/mnt/algos/{job_id}.algo",
+            "--environment-variables",
+            "--exit-on-stop",
+        ]
+        # Append each cBot parameter as a CLI flag
+        for param_name, param_value in params.items():
+            if isinstance(param_value, float) and param_value == int(param_value):
+                command.append(f"--{param_name}={int(param_value)}")
+            else:
+                command.append(f"--{param_name}={param_value}")
 
         logger.info(
-            "Starting pass %s (job %s) with params %s",
-            pass_id, job_id, json.dumps(params),
+            "Starting pass %s (job %s) with params %s | cmd=%s",
+            pass_id, job_id, json.dumps(params), " ".join(command),
         )
 
         # Run container in executor to avoid blocking the event loop
@@ -158,9 +165,9 @@ async def run_single_pass(
                 command=command,
                 environment=environment,
                 volumes={
-                    algos_mount: {"bind": "/mnt/algos", "mode": "rw"},
-                    results_mount: {"bind": "/mnt/results", "mode": "rw"},
-                    pwd_file_host: {"bind": "/mnt/pwd", "mode": "ro"},
+                    host_algos: {"bind": "/mnt/algos", "mode": "rw"},
+                    host_results: {"bind": "/mnt/results", "mode": "rw"},
+                    host_pwd: {"bind": "/mnt/pwd", "mode": "ro"},
                 },
                 remove=False,
                 detach=True,
@@ -206,7 +213,7 @@ async def run_single_pass(
                 await loop.run_in_executor(None, lambda: container.remove(force=True))
             except Exception:
                 pass
-            err_msg = f"Container exited with code {exit_code}: {logs[-500:]}"
+            err_msg = f"Container exited with code {exit_code}: {logs[-4000:]}"
             logger.error("Pass %s failed: %s", pass_id, err_msg)
             await update_pass_failed(db, pass_id, err_msg, utcnow_iso())
             await increment_completed(db, job_id, utcnow_iso())
@@ -234,10 +241,6 @@ async def run_single_pass(
         await increment_completed(db, job_id, utcnow_iso())
     finally:
         await db.close()
-        # Cleanup temp cbotset
-        cbotset_file = settings.algos_dir / f"{pass_id}.cbotset"
-        if cbotset_file.exists():
-            cbotset_file.unlink(missing_ok=True)
 
 
 # ── Genetic generation manager ─────────────────────────────────────────────

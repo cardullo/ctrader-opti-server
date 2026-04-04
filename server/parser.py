@@ -105,6 +105,21 @@ def _find_in_dict(d: Any, target_keys: List[str], default: Any = None) -> Any:
     return default
 
 
+def _unwrap_metric_value(value: Any) -> Any:
+    """
+    Normalise nested metric objects from cTrader reports.
+
+    Some report sections store values as {"all": x, "long": y, "short": z}.
+    For optimization ranking we want the aggregate "all" value.
+    """
+    if isinstance(value, dict):
+        for key in ("all", "value", "formatted"):
+            candidate = value.get(key)
+            if not isinstance(candidate, (dict, list)) and candidate is not None:
+                return candidate
+    return value
+
+
 def _extract_metrics(raw: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extract a normalised metrics dict from the ctrader-cli report structure.
@@ -131,11 +146,11 @@ def _extract_metrics(raw: Dict[str, Any]) -> Dict[str, Any]:
         # Fast path: check stats and data directly
         for k in keys:
             if k in stats:
-                return stats[k]
+                return _unwrap_metric_value(stats[k])
             if k in data:
-                return data[k]
+                return _unwrap_metric_value(data[k])
         # Slow path: recursive search in the full raw dict
-        return _find_in_dict(raw, keys, default)
+        return _unwrap_metric_value(_find_in_dict(raw, keys, default))
 
     net_profit = _g(["netProfit", "NetProfit", "net_profit"], 0.0)
     gross_profit = _g(["grossProfit", "GrossProfit", "gross_profit"], 0.0)
@@ -145,11 +160,13 @@ def _extract_metrics(raw: Dict[str, Any]) -> Dict[str, Any]:
     max_drawdown_pct = _g(
         ["maxEquityDrawdownPercentage", "MaxEquityDrawdownPercentage",
          "MaxBalanceDrawdownPercentage", "maxBalanceDrawdownPercentage",
+         "maxEquityDrawdownPercent", "maxBalanceDrawdownPercent",
          "maxDrawdownPct", "max_drawdown_pct"],
         0.0,
     )
     max_drawdown_abs = _g(
         ["maxEquityDrawdown", "MaxEquityDrawdown",
+         "maxEquityDrawdownAbsolute", "maxBalanceDrawdownAbsolute",
          "MaxBalanceDrawdown", "maxBalanceDrawdown",
          "maxDrawdownAbs", "max_drawdown_abs"],
         0.0,
@@ -166,8 +183,11 @@ def _extract_metrics(raw: Dict[str, Any]) -> Dict[str, Any]:
     avg_trade_duration = _g(
         ["averageTradeDuration", "AverageTradeDuration", "avg_trade_duration"], ""
     )
-    start_balance = _g(["startBalance", "StartBalance", "start_balance", "balance", "Balance"], 0.0)
-    end_balance = _g(["endBalance", "EndBalance", "end_balance"], 0.0)
+    start_balance = _g(
+        ["startBalance", "StartBalance", "start_balance", "startingCapital", "balance", "Balance"],
+        0.0,
+    )
+    end_balance = _g(["endBalance", "EndBalance", "end_balance", "endingBalance"], 0.0)
 
     # If end_balance is 0 but we have start_balance and net_profit, compute it
     if _to_float(end_balance) == 0.0 and _to_float(start_balance) > 0 and _to_float(net_profit) != 0:

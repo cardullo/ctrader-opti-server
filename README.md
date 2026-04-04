@@ -41,7 +41,15 @@ API_KEY=your-strong-secret-key
 CTID=your_ctid@example.com
 PWD_FILE_PATH=/data/pwd
 CTRADER_ACCOUNT=12345678
+HOST_DATA_DIR=/home/opti/ctrader-opti-server/data
+HOST_PWD_FILE_PATH=/home/opti/ctrader-opti-server/data/pwd
 ```
+
+`PWD_FILE_PATH` is the path inside the server container. When the server runs
+via Docker Compose and launches sibling `ctrader-console` containers through
+the Docker socket, `HOST_DATA_DIR` and `HOST_PWD_FILE_PATH` must point to the
+real host-side paths so those sibling containers can mount the `.algo`,
+results, and password file correctly.
 
 ### 2. Create the password file
 

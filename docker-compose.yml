@@ -7,6 +7,12 @@ services:
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock
     env_file: .env
+    environment:
+      # HOST_DATA_DIR tells the worker where /data lives on the Docker host,
+      # so sibling ctrader-cli containers get correct bind-mount paths.
+      - HOST_DATA_DIR=${HOST_DATA_DIR:-/home/opti/ctrader-opti-server/data}
+      # Separate host-side password path for sibling ctrader-cli mounts.
+      - HOST_PWD_FILE_PATH=${HOST_PWD_FILE_PATH:-/home/opti/ctrader-opti-server/data/pwd}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
