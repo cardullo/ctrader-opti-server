@@ -31,6 +31,10 @@ The server is designed to run on a Linux VPS with Docker. We recommend **Ubuntu 
    - `CTRADER_ACCOUNT`: The account number for backtests.
    - `HOST_DATA_DIR`: Absolute path to the `data/` folder on the VPS host (e.g., `/home/opti/ctrader-opti-server/data`).
    - `HOST_PWD_FILE_PATH`: Absolute path to your cTrader password file on the host.
+   - `HOST_FSB_REPO_ROOT`: Host path to the checked-out `ctrade-backtest-engine` repo used for `fsb_search`.
+   - `FSB_REPO_ROOT`: In-container mount point for that repo, usually `/opt/fsb`.
+   - `FSB_PYTHON_BIN`: Python interpreter inside the mounted fsb virtualenv.
+   - `FSB_DATA_DSN`: Market DB DSN the VPS fsb worker must use. If this is missing, `/health` reports `fsb_ready=false` and `fsb_search` job creation is rejected.
 
 3. **Secure cTrader Password**:
    Create a password file on the VPS. This file is **never** sent over the network; it is mounted directly into the `ctrader-cli` containers.
@@ -44,6 +48,25 @@ The server is designed to run on a Linux VPS with Docker. We recommend **Ubuntu 
    ```bash
    docker compose up -d --build
    ```
+
+5. **Optional SSH tunnel for MacBook DB sync**:
+   If you do not want to expose Postgres publicly, tunnel it instead:
+   ```bash
+   ssh -L 55432:localhost:55432 opti@your-vps-ip
+   ```
+
+6. **VPS-first export imports**:
+   The VPS can now import completed export artifacts straight into its own
+   `market-db`. This is the recommended steady-state flow once the VPS DB has
+   been bootstrapped:
+   ```bash
+   ./scripts/sync_remote_export_jobs.sh \
+     --target vps \
+     --job-id YOUR-EXPORT-JOB-ID \
+     --delete-remote
+   ```
+   Successful imports delete the corresponding artifact folders immediately,
+   while malformed artifacts are quarantined under `data/quarantine/`.
 
 ---
 

@@ -25,6 +25,9 @@ data/*.db-wal
 data/*.db-shm
 data/pwd
 
+# Proprietary local cBots / exports
+/cbot_strategies/
+
 # Local deployment & tests
 kamatera.md
 *.sh

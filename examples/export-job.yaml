@@ -1,0 +1,22 @@
+# Example export job configuration for cTrader Optimization Server
+# Save as export-job.yaml and submit with:
+#   python -m client.opti submit --algo CandleExportBot.algo --config export-job.yaml
+
+name: EURUSD_tick_export
+strategy: export
+parallel_workers: 2
+chunks:
+  - symbol: EURUSD
+    period: t1
+    start_utc: "2025-01-01T00:00:00Z"
+    end_utc: "2025-02-01T00:00:00Z"
+    data_mode: ticks
+    broker_code: icmarkets
+    balance: 10000
+  - symbol: EURUSD
+    period: t1
+    start_utc: "2025-02-01T00:00:00Z"
+    end_utc: "2025-03-01T00:00:00Z"
+    data_mode: ticks
+    broker_code: icmarkets
+    balance: 10000

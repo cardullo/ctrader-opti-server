@@ -1,0 +1,67 @@
+name: DualEmaCrossoverBot_phase4_exit_genetic_provisional_40_110
+symbol: EURUSD
+period: t100
+start: "01/01/2024"
+end: "31/12/2025"
+data_mode: ticks
+balance: 10000
+commission: 15
+spread: 1
+strategy: genetic
+max_passes: 120
+parallel_workers: 3
+fitness: profit_factor
+ranking:
+  - metric: profit_factor
+    direction: desc
+  - metric: max_drawdown_pct
+    direction: asc
+  - metric: average_trade
+    direction: desc
+constraints:
+  - metric: total_trades
+    operator: gte
+    value: 100
+  - metric: max_drawdown_pct
+    operator: lte
+    value: 25
+fixed_params:
+  FastEmaPeriod: 40
+  SlowEmaPeriod: 110
+  UseHtfFilter: false
+  HtfTimeFrame: h1
+  HtfEmaPeriod: 50
+  UseCompounding: true
+  FixedVolume: 2000
+  RiskPercent: 2.0
+  MaxPositionSizePercent: 300.0
+  TpRMultiple: 2.5
+  TrailingActivationPips: 0.3
+  TrailingStopStandardPips: 2.7
+  TrailingStopHighVolPips: 3.8
+  HighVolStartHour: 12
+  HighVolEndHour: 15
+  MinStopLossPips: 3.0
+  MaxStopLossPips: 15.0
+  SessionStartHour: 8
+  SessionEndHour: 16
+  RequireFreshCross: true
+  TradeLabel: DualEMA
+params:
+  TpRMultiple:
+    min: 0.0
+    max: 3.5
+    step: 0.5
+  TrailingActivationPips:
+    min: 0.2
+    max: 0.8
+    step: 0.1
+  TrailingStopStandardPips:
+    min: 1.5
+    max: 4.0
+    step: 0.25
+  TrailingStopHighVolPips:
+    min: 2.0
+    max: 5.5
+    step: 0.25
+

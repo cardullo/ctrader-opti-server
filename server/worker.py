@@ -10,9 +10,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 import tempfile
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -28,15 +30,21 @@ from server.db import (
     update_pass_running,
     update_pass_done,
     update_pass_failed,
+    update_job_error,
+    update_job_progress,
     update_job_status,
+    update_job_worker_pid,
     increment_completed,
     requeue_running_passes,
     get_done_passes_for_job,
     insert_passes,
+    mark_orphaned_fsb_jobs_failed,
+    upsert_fsb_pass,
 )
-from server.models import JobConfig, ParamRange, utcnow_iso
+from server.models import JobConfig, JobType, ParamRange, Strategy, utcnow_iso
 from server.optimizer import next_generation
 from server.parser import parse_report
+from server.ranking import build_ranked_population
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +66,68 @@ def check_docker() -> bool:
         return True
     except Exception:
         return False
+
+
+class FsbJobProgressState:
+    def __init__(self, *, started_monotonic: float, total_passes: int) -> None:
+        self.started_monotonic = started_monotonic
+        self.total_passes = total_passes
+        self.current_generation = 0
+        self.generation_total = 0
+        self.generation_completed = 0
+        self.passed = 0
+        self.rejected = 0
+        self.running = 0
+        self.durations: list[float] = []
+        self.state = "running"
+
+    def generation_started(self, generation: int, total_candidates: int) -> dict[str, Any]:
+        self.current_generation = generation
+        self.generation_total = total_candidates
+        self.generation_completed = 0
+        self.passed = 0
+        self.rejected = 0
+        self.running = 0
+        return self.snapshot()
+
+    def candidate_started(self) -> dict[str, Any]:
+        self.running += 1
+        return self.snapshot()
+
+    def candidate_finished(self, *, status: str, duration_seconds: float) -> dict[str, Any]:
+        self.generation_completed += 1
+        self.running = max(0, self.running - 1)
+        if status == "passed":
+            self.passed += 1
+        elif status == "rejected":
+            self.rejected += 1
+        self.durations.append(duration_seconds)
+        return self.snapshot()
+
+    def set_state(self, state: str) -> dict[str, Any]:
+        self.state = state
+        self.running = 0
+        return self.snapshot()
+
+    def snapshot(self) -> dict[str, Any]:
+        elapsed_seconds = max(0.0, asyncio.get_event_loop().time() - self.started_monotonic)
+        average = (sum(self.durations) / len(self.durations)) if self.durations else None
+        remaining = max(0, self.generation_total - self.generation_completed - self.running)
+        eta_seconds = (average * remaining) if average is not None else None
+        return {
+            "state": self.state,
+            "current_generation": self.current_generation,
+            "generation_total": self.generation_total,
+            "generation_completed": self.generation_completed,
+            "passed": self.passed,
+            "rejected": self.rejected,
+            "running": self.running,
+            "remaining": remaining,
+            "elapsed_seconds": elapsed_seconds,
+            "eta_seconds": eta_seconds,
+            "completed_passes": len(self.durations),
+            "planned_total_passes": self.total_passes,
+        }
 
 
 # ── .cbotset writer ─────────────────────────────────────────────────────────
@@ -89,6 +159,361 @@ def write_cbotset(params: Dict[str, Any], path: Path) -> None:
     tree.write(str(path), encoding="unicode", xml_declaration=True)
 
 
+def _format_iso_utc_for_ctrader(value: str) -> str:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError(f"Expected timezone-aware ISO timestamp, got {value!r}")
+    return parsed.astimezone(timezone.utc).strftime("%d/%m/%Y %H:%M")
+
+
+def _format_cli_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float) and value == int(value):
+        return str(int(value))
+    return str(value)
+
+
+def _build_optimization_environment(
+    *,
+    ctid: str,
+    account: str,
+    config: JobConfig,
+) -> Dict[str, str]:
+    return {
+        "CTID": ctid,
+        "PWD-FILE": "/mnt/pwd",
+        "ACCOUNT": account,
+        "SYMBOL": config.symbol,
+        "PERIOD": config.period,
+        "START": config.start,
+        "END": config.end,
+        "DATA-MODE": config.data_mode,
+        "BALANCE": str(int(config.balance)),
+        "COMMISSION": str(int(config.commission)),
+        "SPREAD": str(int(config.spread)),
+        "REPORT-JSON": "/mnt/results/report.json",
+    }
+
+
+def _build_optimization_command(job_id: str, params: Dict[str, Any]) -> List[str]:
+    command = [
+        "backtest",
+        f"/mnt/algos/{job_id}.algo",
+        "--environment-variables",
+        "--exit-on-stop",
+    ]
+    for param_name, param_value in params.items():
+        if isinstance(param_value, float) and param_value == int(param_value):
+            command.append(f"--{param_name}={int(param_value)}")
+        else:
+            command.append(f"--{param_name}={param_value}")
+    return command
+
+
+def _build_export_environment(
+    *,
+    ctid: str,
+    account: str,
+    params: Dict[str, Any],
+    config: JobConfig,
+) -> Dict[str, str]:
+    symbol = str(params.get("symbol") or config.symbol)
+    period = str(params.get("period") or config.period)
+    start_utc = str(params["start_utc"])
+    end_utc = str(params["end_utc"])
+    data_mode = str(params.get("data_mode") or config.data_mode)
+    balance = params.get("balance", config.balance)
+    commission = params.get("commission", config.commission)
+    spread = params.get("spread", config.spread)
+
+    return {
+        "CTID": ctid,
+        "PWD-FILE": "/mnt/pwd",
+        "ACCOUNT": account,
+        "SYMBOL": symbol,
+        "PERIOD": period,
+        "START": _format_iso_utc_for_ctrader(start_utc),
+        "END": _format_iso_utc_for_ctrader(end_utc),
+        "DATA-MODE": data_mode,
+        "BALANCE": _format_cli_value(balance),
+        "COMMISSION": _format_cli_value(commission),
+        "SPREAD": _format_cli_value(spread),
+    }
+
+
+def _build_export_command(job_id: str, pass_id: str, params: Dict[str, Any], config: JobConfig) -> List[str]:
+    data_mode = str(params.get("data_mode") or config.data_mode)
+    broker_code = str(params.get("broker_code") or "unknown")
+    requested_start_utc = str(params["start_utc"])
+    requested_end_utc = str(params["end_utc"])
+    cbot_params = {**config.fixed_params, **dict(params.get("cbot_params") or {})}
+
+    command = [
+        "backtest",
+        f"/mnt/algos/{job_id}.algo",
+        "--environment-variables",
+        "--exit-on-stop",
+        "--full-access",
+        f"--RunId={pass_id}",
+        f"--BrokerCode={broker_code}",
+        f"--DataModeLabel={data_mode}",
+        f"--RequestedStartUtc={requested_start_utc}",
+        f"--RequestedEndUtc={requested_end_utc}",
+        "--ExportDirectoryPath=/mnt/results",
+    ]
+    for param_name, param_value in cbot_params.items():
+        command.append(f"--{param_name}={_format_cli_value(param_value)}")
+    return command
+
+
+def _export_artifacts_exist(result_dir: Path) -> bool:
+    return (result_dir / "manifest.json").exists() and (result_dir / "bars.csv").exists()
+
+
+def _cleanup_export_cache(job_id: str, pass_id: str) -> None:
+    pass_cache_dir = settings.algos_dir / "data" / job_id / pass_id
+    if pass_cache_dir.exists():
+        shutil.rmtree(pass_cache_dir, ignore_errors=True)
+
+    job_cache_dir = settings.algos_dir / "data" / job_id
+    try:
+        if job_cache_dir.exists() and not any(job_cache_dir.iterdir()):
+            job_cache_dir.rmdir()
+    except OSError:
+        pass
+
+
+def _cleanup_failed_export_result_dir(result_dir: Path) -> None:
+    manifest_path = result_dir / "manifest.json"
+    bars_path = result_dir / "bars.csv"
+    if manifest_path.exists() or bars_path.exists():
+        return
+    shutil.rmtree(result_dir, ignore_errors=True)
+
+
+def _parse_export_result(
+    result_dir: Path,
+    host_result_dir: Path,
+    pass_id: str,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    manifest_path = result_dir / "manifest.json"
+    bars_path = result_dir / "bars.csv"
+
+    if not manifest_path.exists() or not bars_path.exists():
+        raise FileNotFoundError(f"Expected export artifacts in {result_dir}")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    row_count = int(manifest.get("row_count") or 0)
+
+    return {
+        "job_type": "export",
+        "run_id": manifest.get("run_id") or pass_id,
+        "broker_code": manifest.get("broker_code") or params.get("broker_code"),
+        "symbol": manifest.get("symbol") or params.get("symbol"),
+        "timeframe": manifest.get("timeframe") or params.get("period"),
+        "data_mode_label": manifest.get("data_mode_label") or params.get("data_mode"),
+        "requested_start_utc": manifest.get("requested_start_utc") or params.get("start_utc"),
+        "requested_end_utc": manifest.get("requested_end_utc") or params.get("end_utc"),
+        "first_bar_utc": manifest.get("first_bar_utc"),
+        "last_bar_utc": manifest.get("last_bar_utc"),
+        "row_count": row_count,
+        "artifact_dir": str(result_dir),
+        "host_artifact_dir": str(host_result_dir),
+        "manifest_path": str(manifest_path),
+        "bars_path": str(bars_path),
+        "bars_bytes": bars_path.stat().st_size,
+        "manifest_bytes": manifest_path.stat().st_size,
+    }
+
+
+def _fsb_job_ready() -> tuple[bool, str]:
+    if not settings.fsb_data_dsn.strip():
+        return False, "FSB_DATA_DSN is not configured on the server"
+    if not settings.fsb_repo_root.exists():
+        return False, f"FSB_REPO_ROOT does not exist: {settings.fsb_repo_root}"
+    if not Path(settings.fsb_python_bin).exists():
+        return False, f"FSB_PYTHON_BIN does not exist: {settings.fsb_python_bin}"
+    return True, "ok"
+
+
+def _fsb_pass_id(generation: int, strategy_id: str) -> str:
+    return f"g{generation:03d}-{strategy_id}"
+
+
+async def _handle_fsb_event(
+    db,
+    *,
+    job_id: str,
+    event: dict[str, Any],
+    state: FsbJobProgressState,
+) -> None:
+    event_name = event.get("event")
+    if event_name == "generation_started":
+        snapshot = state.generation_started(
+            generation=int(event.get("generation") or 0),
+            total_candidates=int(event.get("total_candidates") or 0),
+        )
+        await update_job_progress(db, job_id, json.dumps(snapshot), utcnow_iso())
+        return
+
+    if event_name == "candidate_started":
+        strategy = dict(event.get("strategy") or {})
+        generation = int(event.get("generation") or 0)
+        strategy_id = str(event.get("strategy_id") or strategy.get("strategy_id") or "")
+        family = str(event.get("family") or strategy.get("family") or "")
+        await upsert_fsb_pass(
+            db,
+            pass_id=_fsb_pass_id(generation, strategy_id),
+            job_id=job_id,
+            params_json=json.dumps(strategy),
+            status="running",
+            generation=generation,
+            strategy_id=strategy_id,
+            family=family,
+            candidate_status="running",
+            started_at=utcnow_iso(),
+        )
+        snapshot = state.candidate_started()
+        await update_job_progress(db, job_id, json.dumps(snapshot), utcnow_iso())
+        return
+
+    if event_name == "candidate_finished":
+        strategy = dict(event.get("strategy") or {})
+        generation = int(event.get("generation") or 0)
+        strategy_id = str(event.get("strategy_id") or strategy.get("strategy_id") or "")
+        family = str(event.get("family") or strategy.get("family") or "")
+        candidate_status = str(event.get("status") or "failed")
+        result_payload = dict(event.get("metrics") or {})
+        result_payload.update(
+            {
+                "stage": event.get("stage"),
+                "rejection_code": event.get("rejection_code"),
+                "rejection_detail": event.get("rejection_detail"),
+            }
+        )
+        await upsert_fsb_pass(
+            db,
+            pass_id=_fsb_pass_id(generation, strategy_id),
+            job_id=job_id,
+            params_json=json.dumps(strategy),
+            status="done" if candidate_status in {"passed", "rejected"} else "failed",
+            generation=generation,
+            strategy_id=strategy_id,
+            family=family,
+            candidate_status=candidate_status,
+            finished_at=utcnow_iso(),
+            result_json=json.dumps(result_payload),
+        )
+        await increment_completed(db, job_id, utcnow_iso())
+        snapshot = state.candidate_finished(
+            status=candidate_status,
+            duration_seconds=float(event.get("duration_seconds") or 0.0),
+        )
+        await update_job_progress(db, job_id, json.dumps(snapshot), utcnow_iso())
+        return
+
+    if event_name == "search_finished":
+        snapshot = state.set_state(str(event.get("state") or "done"))
+        await update_job_progress(db, job_id, json.dumps(snapshot), utcnow_iso())
+
+
+async def _process_fsb_job(job_row: dict, job_sem: asyncio.Semaphore) -> None:
+    job_id = job_row["id"]
+    payload = json.loads(job_row["config_json"])
+    ready, detail = _fsb_job_ready()
+    db = await get_db()
+    try:
+        if not ready:
+            await update_job_error(db, job_id, detail, utcnow_iso())
+            await update_job_status(db, job_id, "failed", utcnow_iso())
+            return
+
+        async with job_sem:
+            payload_path = Path(job_row["algo_path"])
+            payload["job_id"] = job_id
+            payload_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+            state = FsbJobProgressState(
+                started_monotonic=asyncio.get_event_loop().time(),
+                total_passes=int(job_row["total_passes"] or 0),
+            )
+            await update_job_status(db, job_id, "running", utcnow_iso())
+            await update_job_progress(db, job_id, json.dumps(state.snapshot()), utcnow_iso())
+            await update_job_error(db, job_id, None, utcnow_iso())
+
+            env = os.environ.copy()
+            pythonpath_parts = [str(settings.fsb_repo_root / "src")]
+            if env.get("PYTHONPATH"):
+                pythonpath_parts.append(env["PYTHONPATH"])
+            env.update(
+                {
+                    "FSB_DATA_DSN": settings.fsb_data_dsn,
+                    "PYTHONPATH": os.pathsep.join(pythonpath_parts),
+                }
+            )
+
+            process = await asyncio.create_subprocess_exec(
+                settings.fsb_python_bin,
+                "-m",
+                "forex_scalping_backtester.remote_worker",
+                str(payload_path),
+                cwd=str(settings.fsb_repo_root),
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await update_job_worker_pid(db, job_id, process.pid, utcnow_iso())
+            stderr_task = asyncio.create_task(process.stderr.read())
+
+            assert process.stdout is not None
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").strip()
+                if not text:
+                    continue
+                try:
+                    event = json.loads(text)
+                except json.JSONDecodeError:
+                    logger.warning("Ignoring non-JSON fsb worker line for job %s: %s", job_id, text)
+                    continue
+                await _handle_fsb_event(db, job_id=job_id, event=event, state=state)
+
+            return_code = await process.wait()
+            stderr_output = (await stderr_task).decode("utf-8", errors="replace").strip()
+
+            final_snapshot = state.snapshot()
+            completed = int(final_snapshot.get("completed_passes") or 0)
+            await db.execute(
+                "UPDATE jobs SET total_passes = ?, updated_at = ? WHERE id = ?",
+                (completed or int(job_row["total_passes"] or 0), utcnow_iso(), job_id),
+            )
+            await db.commit()
+
+            if return_code != 0:
+                error_detail = stderr_output or f"fsb worker exited with code {return_code}"
+                await update_job_error(db, job_id, error_detail, utcnow_iso())
+                await update_job_progress(db, job_id, json.dumps(state.set_state("failed")), utcnow_iso())
+                await update_job_status(db, job_id, "failed", utcnow_iso())
+                return
+
+            if state.state != "done":
+                await update_job_progress(db, job_id, json.dumps(state.set_state("done")), utcnow_iso())
+            await update_job_status(db, job_id, "done", utcnow_iso())
+            payload_path.unlink(missing_ok=True)
+    except Exception as exc:
+        logger.error("fsb job %s failed: %s", job_id, exc, exc_info=True)
+        await update_job_error(db, job_id, str(exc), utcnow_iso())
+        await update_job_progress(db, job_id, json.dumps(state.set_state("failed") if "state" in locals() else {}), utcnow_iso())
+        await update_job_status(db, job_id, "failed", utcnow_iso())
+    finally:
+        await update_job_worker_pid(db, job_id, None, utcnow_iso())
+        await db.close()
+
+
 # ── Single pass executor ───────────────────────────────────────────────────
 
 async def run_single_pass(
@@ -116,38 +541,21 @@ async def run_single_pass(
         host_results = str((settings.host_results_dir / pass_id).resolve())
         host_pwd = str(settings.host_pwd_file_path.resolve())
 
-        # ctrader-cli uses hyphenated env var names for backtest config.
-        # cBot parameters are passed as --ParamName=Value flags on the
-        # command line (NOT via a .cbotset file when using --environment-variables).
-        environment = {
-            "CTID": ctid,
-            "PWD-FILE": "/mnt/pwd",
-            "ACCOUNT": account,
-            "SYMBOL": config.symbol,
-            "PERIOD": config.period,
-            "START": config.start,
-            "END": config.end,
-            "DATA-MODE": config.data_mode,
-            "BALANCE": str(int(config.balance)),
-            "COMMISSION": str(int(config.commission)),
-            "SPREAD": str(int(config.spread)),
-            "REPORT-JSON": "/mnt/results/report.json",
-        }
-
-        # Build command as a list for proper argument parsing.
-        # cBot params go as --Key=Value flags after the other flags.
-        command = [
-            "backtest",
-            f"/mnt/algos/{job_id}.algo",
-            "--environment-variables",
-            "--exit-on-stop",
-        ]
-        # Append each cBot parameter as a CLI flag
-        for param_name, param_value in params.items():
-            if isinstance(param_value, float) and param_value == int(param_value):
-                command.append(f"--{param_name}={int(param_value)}")
-            else:
-                command.append(f"--{param_name}={param_value}")
+        if config.strategy == Strategy.export:
+            environment = _build_export_environment(
+                ctid=ctid,
+                account=account,
+                params=params,
+                config=config,
+            )
+            command = _build_export_command(job_id, pass_id, params, config)
+        else:
+            environment = _build_optimization_environment(
+                ctid=ctid,
+                account=account,
+                config=config,
+            )
+            command = _build_optimization_command(job_id, params)
 
         logger.info(
             "Starting pass %s (job %s) with params %s | cmd=%s",
@@ -208,16 +616,25 @@ async def run_single_pass(
                 )
             except Exception:
                 logs = "Could not retrieve container logs"
-            # Remove container
-            try:
-                await loop.run_in_executor(None, lambda: container.remove(force=True))
-            except Exception:
-                pass
-            err_msg = f"Container exited with code {exit_code}: {logs[-4000:]}"
-            logger.error("Pass %s failed: %s", pass_id, err_msg)
-            await update_pass_failed(db, pass_id, err_msg, utcnow_iso())
-            await increment_completed(db, job_id, utcnow_iso())
-            return
+            if not (config.strategy == Strategy.export and _export_artifacts_exist(result_dir)):
+                # Remove container
+                try:
+                    await loop.run_in_executor(None, lambda: container.remove(force=True))
+                except Exception:
+                    pass
+                if config.strategy == Strategy.export:
+                    _cleanup_failed_export_result_dir(result_dir)
+                err_msg = f"Container exited with code {exit_code}: {logs[-4000:]}"
+                logger.error("Pass %s failed: %s", pass_id, err_msg)
+                await update_pass_failed(db, pass_id, err_msg, utcnow_iso())
+                await increment_completed(db, job_id, utcnow_iso())
+                return
+
+            logger.warning(
+                "Export pass %s exited with code %s after writing artifacts; continuing",
+                pass_id,
+                exit_code,
+            )
 
         # Remove container after successful run
         try:
@@ -225,21 +642,37 @@ async def run_single_pass(
         except Exception:
             pass
 
-        # Parse results
-        result = parse_report(result_dir)
+        if config.strategy == Strategy.export:
+            result = _parse_export_result(
+                result_dir,
+                Path(host_results),
+                pass_id,
+                params,
+            )
+        else:
+            result = parse_report(result_dir)
         await update_pass_done(db, pass_id, json.dumps(result), utcnow_iso())
         await increment_completed(db, job_id, utcnow_iso())
-        logger.info("Pass %s done: net_profit=%.2f", pass_id, result.get("net_profit", 0))
+        if config.strategy == Strategy.export:
+            logger.info("Export pass %s done: rows=%s", pass_id, result.get("row_count", 0))
+        else:
+            logger.info("Pass %s done: net_profit=%.2f", pass_id, result.get("net_profit", 0))
 
     except DockerException as exc:
         logger.error("Docker error on pass %s: %s", pass_id, exc)
+        if config.strategy == Strategy.export:
+            _cleanup_failed_export_result_dir(result_dir)
         await update_pass_failed(db, pass_id, f"Docker error: {exc}", utcnow_iso())
         await increment_completed(db, job_id, utcnow_iso())
     except Exception as exc:
         logger.error("Unexpected error on pass %s: %s", pass_id, exc, exc_info=True)
+        if config.strategy == Strategy.export:
+            _cleanup_failed_export_result_dir(result_dir)
         await update_pass_failed(db, pass_id, str(exc), utcnow_iso())
         await increment_completed(db, job_id, utcnow_iso())
     finally:
+        if config.strategy == Strategy.export:
+            _cleanup_export_cache(job_id, pass_id)
         await db.close()
 
 
@@ -282,18 +715,17 @@ async def _run_genetic_job(
             if used >= total_budget:
                 break
 
-            # Evaluate: get all done passes, score by fitness
+            # Evaluate: rank eligible passes and score them by final rank
             done_passes = await get_done_passes_for_job(db, job_id)
-            fitness_key = config.fitness.value if hasattr(config.fitness, 'value') else config.fitness
-            scored = []
-            for dp in done_passes:
-                if dp["result_json"]:
-                    result = json.loads(dp["result_json"])
-                    score = float(result.get(fitness_key, 0))
-                    params = json.loads(dp["params_json"])
-                    scored.append((params, score))
+            scored = build_ranked_population(done_passes, config)
 
             if len(scored) < 2:
+                logger.warning(
+                    "Genetic job %s stopped after generation %d: only %d passes satisfied ranking constraints",
+                    job_id,
+                    generation,
+                    len(scored),
+                )
                 break
 
             # Produce next generation
@@ -361,6 +793,9 @@ async def worker_loop() -> None:
         recovered = await requeue_running_passes(db)
         if recovered:
             logger.info("Recovered %d interrupted passes → re-queued", recovered)
+        orphaned = await mark_orphaned_fsb_jobs_failed(db, utcnow_iso())
+        if orphaned:
+            logger.info("Marked %d orphaned fsb jobs as failed", orphaned)
     finally:
         await db.close()
 
@@ -387,21 +822,24 @@ async def worker_loop() -> None:
                 if jid in active_jobs and not active_jobs[jid].done():
                     continue
 
-                config = JobConfig(**json.loads(job["config_json"]))
-                parallel = min(
-                    config.parallel_workers,
-                    settings.max_parallel_workers_per_job,
-                )
-                sem = asyncio.Semaphore(parallel)
-
-                if config.strategy.value == "genetic":
-                    task = asyncio.create_task(
-                        _process_genetic_job(jid, config, sem, job_semaphore)
-                    )
+                if (job.get("job_type") or JobType.opti.value) == JobType.fsb_search.value:
+                    task = asyncio.create_task(_process_fsb_job(job, job_semaphore))
                 else:
-                    task = asyncio.create_task(
-                        _process_standard_job(jid, config, sem, job_semaphore)
+                    config = JobConfig(**json.loads(job["config_json"]))
+                    parallel = min(
+                        config.parallel_workers,
+                        settings.max_parallel_workers_per_job,
                     )
+                    sem = asyncio.Semaphore(parallel)
+
+                    if config.strategy.value == "genetic":
+                        task = asyncio.create_task(
+                            _process_genetic_job(jid, config, sem, job_semaphore)
+                        )
+                    else:
+                        task = asyncio.create_task(
+                            _process_standard_job(jid, config, sem, job_semaphore)
+                        )
                 active_jobs[jid] = task
 
             # Clean up completed tasks

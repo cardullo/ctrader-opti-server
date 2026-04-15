@@ -46,6 +46,15 @@ class Settings:
             os.getenv("HOST_DATA_DIR", os.getenv("DATA_DIR", "/data"))
         )
     )
+    fsb_python_bin: str = field(
+        default_factory=lambda: os.getenv("FSB_PYTHON_BIN", "/opt/fsb/.venv/bin/python")
+    )
+    fsb_repo_root: Path = field(
+        default_factory=lambda: Path(os.getenv("FSB_REPO_ROOT", "/opt/fsb"))
+    )
+    fsb_data_dsn: str = field(
+        default_factory=lambda: os.getenv("FSB_DATA_DSN", "")
+    )
 
     # Derived paths (inside the server container) ----------------------------
     @property
@@ -55,6 +64,10 @@ class Settings:
     @property
     def results_dir(self) -> Path:
         return self.data_dir / "results"
+
+    @property
+    def quarantine_dir(self) -> Path:
+        return self.data_dir / "quarantine" / "CandleExportBot"
 
     # Host-side paths (for sibling container bind mounts) --------------------
     @property
@@ -81,6 +94,11 @@ class Settings:
         """Create required data directories if they don't exist."""
         self.algos_dir.mkdir(parents=True, exist_ok=True)
         self.results_dir.mkdir(parents=True, exist_ok=True)
+        self.quarantine_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def fsb_ready(self) -> bool:
+        return bool(self.fsb_data_dsn.strip()) and self.fsb_repo_root.exists() and Path(self.fsb_python_bin).exists()
 
 
 settings = Settings()

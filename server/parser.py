@@ -172,6 +172,18 @@ def _extract_metrics(raw: Dict[str, Any]) -> Dict[str, Any]:
         0.0,
     )
     total_trades = _g(["totalTrades", "TotalTrades", "total_trades"], 0)
+    average_trade = _g(
+        [
+            "averageTrade",
+            "AverageTrade",
+            "average_trade",
+            "averageNetProfitPerTrade",
+            "AverageNetProfitPerTrade",
+            "avgTrade",
+            "avg_trade",
+        ],
+        None,
+    )
 
     # Win rate — prefer explicit win rate, otherwise compute from winning trades
     winning = _g(["winningTrades", "WinningTrades", "winning_trades"], 0)
@@ -193,12 +205,16 @@ def _extract_metrics(raw: Dict[str, Any]) -> Dict[str, Any]:
     if _to_float(end_balance) == 0.0 and _to_float(start_balance) > 0 and _to_float(net_profit) != 0:
         end_balance = _to_float(start_balance) + _to_float(net_profit)
 
+    if average_trade is None and _to_int(total_trades) > 0:
+        average_trade = _to_float(net_profit) / _to_int(total_trades)
+
     return {
         "net_profit": _to_float(net_profit),
         "gross_profit": _to_float(gross_profit),
         "gross_loss": _to_float(gross_loss),
         "profit_factor": _to_float(profit_factor),
         "sharpe_ratio": _to_float(sharpe_ratio),
+        "average_trade": _to_float(average_trade),
         "max_drawdown_pct": _to_float(max_drawdown_pct),
         "max_drawdown_abs": _to_float(max_drawdown_abs),
         "win_rate": _to_float(win_rate),
@@ -230,6 +246,7 @@ def _empty_result(error: str) -> Dict[str, Any]:
         "gross_loss": 0.0,
         "profit_factor": 0.0,
         "sharpe_ratio": 0.0,
+        "average_trade": 0.0,
         "max_drawdown_pct": 0.0,
         "max_drawdown_abs": 0.0,
         "win_rate": 0.0,

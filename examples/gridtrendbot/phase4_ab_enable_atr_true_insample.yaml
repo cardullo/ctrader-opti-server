@@ -1,0 +1,64 @@
+name: GridTrendBot_phase4_ab_enable_atr_true_insample
+symbol: EURUSD
+period: m5
+start: "01/01/2024"
+end: "31/12/2025"
+data_mode: m1
+balance: 10000
+commission: 15
+spread: 1
+strategy: grid
+max_passes: 1
+parallel_workers: 1
+fitness: profit_factor
+ranking:
+  - metric: profit_factor
+    direction: desc
+  - metric: max_drawdown_pct
+    direction: asc
+  - metric: average_trade
+    direction: desc
+constraints:
+  - metric: total_trades
+    operator: gte
+    value: 100
+  - metric: max_drawdown_pct
+    operator: lte
+    value: 25
+fixed_params:
+  GridSizePips: 34.0
+  LevelsAboveBelow: 14
+  EntryMode: 0
+  TrailingMode: 0
+  GridOffsetPips: 0.0
+  UseAtrGrid: false
+  AtrGridPeriod: 16
+  AtrGridMultiplier: 1.1
+  SizingMode: 0
+  FixedLotSize: 0.01
+  RiskPercent: 1.0
+  MaxDailyLossPercent: 10.0
+  MaxSpreadPips: 3.0
+  CooldownBars: 0
+  EnableAdxFilter: true
+  AdxPeriod: 14
+  AdxThresholdLow: 28.0
+  AdxThresholdHigh: 40.0
+  AdxFilterMode: 0
+  EnableAtrFilter: true
+  AtrPeriod: 12
+  AtrMaPeriod: 19
+  EnableMaBias: false
+  MaPeriod: 23
+  MaType: 9
+  EnableSessionFilter: true
+  SessionStartHour: 7
+  SessionStartMinute: 0
+  SessionEndHour: 22
+  SessionEndMinute: 0
+  EnableMidLines: false
+  EnableMidLinePartialTP: false
+  PartialTPPercent: 30.0
+  MidLineMomentumGate: false
+params: {}
+

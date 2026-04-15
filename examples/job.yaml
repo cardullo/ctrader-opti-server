@@ -14,6 +14,20 @@ strategy: genetic
 max_passes: 200
 parallel_workers: 4
 fitness: profit_factor
+fixed_params:
+  EnableSessionFilter: true
+ranking:
+  - metric: profit_factor
+    direction: desc
+  - metric: max_drawdown_pct
+    direction: asc
+constraints:
+  - metric: total_trades
+    operator: gte
+    value: 100
+  - metric: max_drawdown_pct
+    operator: lte
+    value: 25
 params:
   FastPeriod:
     min: 5

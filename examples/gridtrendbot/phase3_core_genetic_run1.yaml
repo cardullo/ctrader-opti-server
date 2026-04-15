@@ -1,0 +1,76 @@
+name: GridTrendBot_phase3_core_genetic_run1
+symbol: EURUSD
+period: m5
+start: "01/01/2024"
+end: "31/12/2025"
+data_mode: m1
+balance: 10000
+commission: 15
+spread: 1
+strategy: genetic
+max_passes: 120
+parallel_workers: 7
+fitness: profit_factor
+ranking:
+  - metric: profit_factor
+    direction: desc
+  - metric: max_drawdown_pct
+    direction: asc
+  - metric: average_trade
+    direction: desc
+constraints:
+  - metric: total_trades
+    operator: gte
+    value: 100
+  - metric: max_drawdown_pct
+    operator: lte
+    value: 25
+fixed_params:
+  GridSizePips: 10.0
+  # Keep this fixed unless later evidence shows it changes live behavior materially.
+  LevelsAboveBelow: 14
+  GridOffsetPips: 0.0
+  UseAtrGrid: false
+  AtrGridPeriod: 16
+  AtrGridMultiplier: 1.1
+  EntryMode: 0
+  TrailingMode: 1
+  SizingMode: 0
+  FixedLotSize: 0.01
+  RiskPercent: 1.0
+  MaxDailyLossPercent: 10.0
+  MaxSpreadPips: 3.0
+  CooldownBars: 0
+  EnableAdxFilter: true
+  AdxPeriod: 14
+  AdxThresholdLow: 26.0
+  AdxThresholdHigh: 34.0
+  AdxFilterMode: 0
+  EnableAtrFilter: false
+  AtrPeriod: 12
+  AtrMaPeriod: 19
+  EnableMaBias: false
+  MaPeriod: 23
+  MaType: 9
+  EnableSessionFilter: true
+  SessionStartHour: 6
+  SessionStartMinute: 0
+  SessionEndHour: 16
+  SessionEndMinute: 0
+  EnableMidLines: false
+  EnableMidLinePartialTP: false
+  PartialTPPercent: 30.0
+  MidLineMomentumGate: false
+params:
+  GridSizePips:
+    min: 8
+    max: 40
+    step: 2
+  EntryMode:
+    min: 0
+    max: 1
+    step: 1
+  TrailingMode:
+    min: 0
+    max: 1
+    step: 1

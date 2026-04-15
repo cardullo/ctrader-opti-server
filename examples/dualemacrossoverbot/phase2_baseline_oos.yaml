@@ -1,0 +1,50 @@
+name: DualEmaCrossoverBot_phase2_baseline_oos
+symbol: EURUSD
+period: t100
+start: "01/01/2026"
+end: "04/04/2026"
+data_mode: ticks
+balance: 10000
+commission: 15
+spread: 1
+strategy: grid
+max_passes: 1
+parallel_workers: 1
+fitness: profit_factor
+ranking:
+  - metric: profit_factor
+    direction: desc
+  - metric: max_drawdown_pct
+    direction: asc
+  - metric: average_trade
+    direction: desc
+constraints:
+  - metric: total_trades
+    operator: gte
+    value: 20
+  - metric: max_drawdown_pct
+    operator: lte
+    value: 25
+fixed_params:
+  FastEmaPeriod: 35
+  SlowEmaPeriod: 144
+  UseHtfFilter: false
+  HtfTimeFrame: h1
+  HtfEmaPeriod: 50
+  UseCompounding: true
+  FixedVolume: 2000
+  RiskPercent: 2.0
+  MaxPositionSizePercent: 300.0
+  TpRMultiple: 2.5
+  TrailingActivationPips: 0.3
+  TrailingStopStandardPips: 2.7
+  TrailingStopHighVolPips: 3.8
+  HighVolStartHour: 12
+  HighVolEndHour: 15
+  MinStopLossPips: 3.0
+  MaxStopLossPips: 15.0
+  SessionStartHour: 8
+  SessionEndHour: 16
+  RequireFreshCross: true
+  TradeLabel: DualEMA
+params: {}

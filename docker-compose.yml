@@ -1,4 +1,22 @@
 services:
+  market-db:
+    image: ${MARKET_DB_IMAGE:-timescale/timescaledb:latest-pg16}
+    environment:
+      - POSTGRES_DB=${MARKET_DB_NAME:-market}
+      - POSTGRES_USER=${MARKET_DB_USER:-postgres}
+      - POSTGRES_PASSWORD=${MARKET_DB_PASSWORD:-postgres}
+    ports:
+      - "127.0.0.1:${MARKET_DB_HOST_PORT:-55432}:5432"
+    volumes:
+      - market-db-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${MARKET_DB_USER:-postgres} -d ${MARKET_DB_NAME:-market}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
   server:
     build: ./server
     ports:
@@ -6,6 +24,7 @@ services:
     volumes:
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOST_FSB_REPO_ROOT:-/home/opti/ctrade-backtest-engine}:${FSB_REPO_ROOT:-/opt/fsb}
     env_file: .env
     environment:
       # HOST_DATA_DIR tells the worker where /data lives on the Docker host,
@@ -13,6 +32,12 @@ services:
       - HOST_DATA_DIR=${HOST_DATA_DIR:-/home/opti/ctrader-opti-server/data}
       # Separate host-side password path for sibling ctrader-cli mounts.
       - HOST_PWD_FILE_PATH=${HOST_PWD_FILE_PATH:-/home/opti/ctrader-opti-server/data/pwd}
+      - FSB_REPO_ROOT=${FSB_REPO_ROOT:-/opt/fsb}
+      - FSB_PYTHON_BIN=${FSB_PYTHON_BIN:-/opt/fsb/.venv/bin/python}
+      - FSB_DATA_DSN=${FSB_DATA_DSN:-}
+    depends_on:
+      market-db:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -20,3 +45,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+
+volumes:
+  market-db-data:
