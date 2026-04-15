@@ -2,7 +2,7 @@
 opti — CLI client for the cTrader Optimization Server.
 
 Commands:
-    submit   Upload an .algo file and start an optimization job
+    submit   Upload an .algo file and start an optimization or export job
     status   Show job status (one or all)
     watch    Live-poll a running job
     results  Display top N passes
@@ -69,7 +69,7 @@ def submit(
     algo: Path = typer.Option(..., "--algo", "-a", help="Path to the .algo file"),
     config: Path = typer.Option(..., "--config", "-c", help="Path to job config YAML"),
 ) -> None:
-    """Upload an .algo file and start an optimization job."""
+    """Upload an .algo file and start an optimization or export job."""
     if not algo.exists():
         console.print(f"[red]Algo file not found:[/] {algo}")
         raise typer.Exit(1)
@@ -120,7 +120,7 @@ def status(
 
 
 def _print_jobs_table(jobs: list) -> None:
-    table = Table(title="Optimization Jobs", show_lines=True)
+    table = Table(title="cTrader Jobs", show_lines=True)
     table.add_column("Name", style="cyan", min_width=20)
     table.add_column("Status", justify="center")
     table.add_column("Strategy", justify="center")
@@ -149,11 +149,13 @@ def _print_jobs_table(jobs: list) -> None:
         best_str = ""
         if j.get("best_pass_summary"):
             bp = j["best_pass_summary"]
-            # Show first numeric metric
-            for key in ("net_profit", "profit_factor", "sharpe_ratio", "win_rate"):
-                if key in bp and bp[key]:
-                    best_str = f"{key}: {bp[key]}"
-                    break
+            if bp.get("ranking_summary"):
+                best_str = bp["ranking_summary"]
+            else:
+                for key in ("profit_factor", "average_trade", "net_profit", "sharpe_ratio", "win_rate"):
+                    if key in bp and bp[key]:
+                        best_str = f"{key}: {bp[key]}"
+                        break
 
         table.add_row(
             j.get("name", ""),
@@ -179,7 +181,10 @@ def _print_job_detail(job: dict) -> None:
 
     if job.get("top_passes"):
         console.print(f"\n  [bold]Top passes:[/]")
-        _print_passes_table(job["top_passes"][:10])
+        if job.get("strategy") == "export":
+            console.print(_build_export_passes_table(job["top_passes"][:10], title="Recent export passes"))
+        else:
+            _print_passes_table(job["top_passes"][:10])
 
 
 # ── watch ───────────────────────────────────────────────────────────────────
@@ -232,6 +237,13 @@ def _build_watch_display(job: dict) -> Table:
 
     if job.get("top_passes"):
         top = job["top_passes"][:10]
+        if job.get("strategy") == "export":
+            outer = Table(show_header=False, box=None)
+            outer.add_column()
+            outer.add_row(header_table)
+            outer.add_row(_build_export_passes_table(top, title="Recent export passes"))
+            return outer
+
         passes_table = Table(title="Top 10 Passes", show_lines=True, min_width=80)
         passes_table.add_column("#", justify="right", style="dim", width=4)
 
@@ -244,7 +256,7 @@ def _build_watch_display(job: dict) -> Table:
         for pk in param_keys:
             passes_table.add_column(pk, justify="right", style="cyan")
 
-        for metric in ["net_profit", "profit_factor", "win_rate", "max_drawdown_pct", "total_trades"]:
+        for metric in ["net_profit", "profit_factor", "average_trade", "win_rate", "max_drawdown_pct", "total_trades"]:
             passes_table.add_column(metric, justify="right")
 
         for i, p in enumerate(top, 1):
@@ -253,7 +265,7 @@ def _build_watch_display(job: dict) -> Table:
             for pk in param_keys:
                 row.append(str(params.get(pk, "")))
             result = p.get("result", {}) or {}
-            for metric in ["net_profit", "profit_factor", "win_rate", "max_drawdown_pct", "total_trades"]:
+            for metric in ["net_profit", "profit_factor", "average_trade", "win_rate", "max_drawdown_pct", "total_trades"]:
                 val = result.get(metric, "")
                 if isinstance(val, float):
                     row.append(f"{val:.2f}")
@@ -278,13 +290,26 @@ def _build_watch_display(job: dict) -> Table:
 def results(
     job_id: str = typer.Argument(..., help="Job ID"),
     top: int = typer.Option(20, "--top", "-n", help="Number of top results"),
-    sort_by: str = typer.Option("net_profit", "--sort-by", "-s", help="Sort metric"),
+    sort_by: Optional[str] = typer.Option(
+        None,
+        "--sort-by",
+        "-s",
+        help="Optional metric override. Omit to use the job's ranking profile.",
+    ),
 ) -> None:
     """Display top N passes sorted by a metric."""
     with _client() as client:
+        job_resp = client.get(_url(f"/jobs/{job_id}"))
+    _handle_error(job_resp)
+    job = job_resp.json()
+
+    params = {"status": "done", "limit": top}
+    if sort_by:
+        params["sort_by"] = sort_by
+    with _client() as client:
         resp = client.get(
             _url(f"/jobs/{job_id}/passes"),
-            params={"status": "done", "sort_by": sort_by, "limit": top},
+            params=params,
         )
     _handle_error(resp)
     passes = resp.json()
@@ -292,7 +317,10 @@ def results(
         console.print("[dim]No completed passes yet.[/]")
         return
 
-    _print_passes_table(passes)
+    if job.get("strategy") == "export":
+        console.print(_build_export_passes_table(passes, title="Completed export passes"))
+    else:
+        _print_passes_table(passes)
 
 
 def _print_passes_table(passes: list) -> None:
@@ -308,7 +336,7 @@ def _print_passes_table(passes: list) -> None:
     for pk in param_keys:
         table.add_column(pk, justify="right", style="cyan")
 
-    metric_cols = ["net_profit", "profit_factor", "win_rate", "max_drawdown_pct", "total_trades"]
+    metric_cols = ["net_profit", "profit_factor", "average_trade", "win_rate", "max_drawdown_pct", "total_trades"]
     for mc in metric_cols:
         table.add_column(mc, justify="right")
 
@@ -329,6 +357,47 @@ def _print_passes_table(passes: list) -> None:
     console.print(table)
 
 
+def _build_export_passes_table(passes: list, *, title: str) -> Table:
+    table = Table(title=title, show_lines=True)
+    table.add_column("Rank", justify="right", style="dim", width=5)
+    table.add_column("Status", justify="center")
+    table.add_column("Symbol", style="cyan")
+    table.add_column("Period", style="cyan")
+    table.add_column("Requested Start", style="dim")
+    table.add_column("Requested End", style="dim")
+    table.add_column("Rows", justify="right")
+    table.add_column("First Bar", style="dim")
+    table.add_column("Last Bar", style="dim")
+    table.add_column("Artifact Dir", style="dim", overflow="fold")
+
+    for i, p in enumerate(passes, 1):
+        params = p.get("params", {}) or {}
+        result = p.get("result", {}) or {}
+        symbol = result.get("symbol") or params.get("symbol", "")
+        period = result.get("timeframe") or params.get("period", "")
+        requested_start = result.get("requested_start_utc") or params.get("start_utc", "")
+        requested_end = result.get("requested_end_utc") or params.get("end_utc", "")
+        row_count = result.get("row_count", "")
+        first_bar = result.get("first_bar_utc", "")
+        last_bar = result.get("last_bar_utc", "")
+        artifact_dir = result.get("host_artifact_dir") or result.get("artifact_dir", "")
+
+        table.add_row(
+            str(i),
+            p.get("status", ""),
+            str(symbol),
+            str(period),
+            str(requested_start),
+            str(requested_end),
+            str(row_count),
+            str(first_bar),
+            str(last_bar),
+            str(artifact_dir),
+        )
+
+    return table
+
+
 # ── best ────────────────────────────────────────────────────────────────────
 
 
@@ -347,6 +416,8 @@ def best(
     params = pr.get("params", {})
 
     console.print("\n[bold green]🏆 Best Pass[/]\n")
+    if pr.get("ranking_eligible") is False:
+        console.print("[bold yellow]Note:[/] this pass did not satisfy the job's ranking constraints.\n")
 
     # Params
     param_table = Table(title="Winning Parameters", show_lines=True)
@@ -388,6 +459,44 @@ def cancel(
     _handle_error(resp)
     console.print(f"[bold yellow]✗ Job {job_id} cancelled.[/]")
 
+
+# ── cleanup ─────────────────────────────────────────────────────────────────
+
+@app.command()
+def cleanup(
+    status: Optional[str] = typer.Option(None, "--status", "-s", help="Delete jobs matching this status (e.g. failed, done)"),
+    before: Optional[str] = typer.Option(None, "--before", "-b", help="Delete jobs created before this date (e.g. 2026-04-13)"),
+    force: bool = typer.Option(False, "--force", "-f", help="Bypass the confirmation prompt"),
+) -> None:
+    """Bulk delete jobs matching specific criteria."""
+    if not status and not before:
+        console.print("[bold red]✗[/] You must provide at least one filter criterion (--status or --before).")
+        raise typer.Exit(1)
+        
+    if not force:
+        msg_parts = []
+        if status:
+            msg_parts.append(f"status='{status}'")
+        if before:
+            msg_parts.append(f"before='{before}'")
+        confirm_msg = f"Are you sure you want to delete ALL jobs matching [{', '.join(msg_parts)}]? This cannot be undone."
+        if not typer.confirm(confirm_msg):
+            console.print("Operation cancelled.")
+            raise typer.Exit(0)
+            
+    params = {}
+    if status:
+        params["status"] = status
+    if before:
+        params["before"] = before
+        
+    with _client() as client:
+        resp = client.delete(_url("/jobs"), params=params)
+        
+    _handle_error(resp)
+    data = resp.json()
+    deleted_count = data.get("deleted_count", 0)
+    console.print(f"[bold green]✓ Successfully deleted {deleted_count} job(s).[/]")
 
 # ── Entry point ─────────────────────────────────────────────────────────────
 
