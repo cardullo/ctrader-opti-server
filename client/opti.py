@@ -84,8 +84,10 @@ def submit(
         with open(algo, "rb") as f:
             resp = client.post(
                 _url("/jobs"),
-                files={"file": (algo.name, f, "application/octet-stream")},
-                data={"config": cfg_json},
+                files={
+                    "file": (algo.name, f, "application/octet-stream"),
+                    "config_file": ("config.json", cfg_json.encode("utf-8"), "application/json")
+                },
             )
     _handle_error(resp)
 

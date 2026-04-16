@@ -337,7 +337,13 @@ async def create_job(request: Request) -> JobCreateResponse:
 
     form = await request.form()
     file = form.get("file")
+    
     config_raw = form.get("config")
+    config_file = form.get("config_file")
+
+    if config_file is not None:
+        config_raw = (await config_file.read()).decode("utf-8")
+
     if file is None or config_raw is None:
         raise HTTPException(status_code=422, detail="Expected multipart form with file and config")
     try:
